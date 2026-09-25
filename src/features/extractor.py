@@ -3,7 +3,7 @@ Pairwise Feature Engineering Module for Business Entity Resolution.
 Computes string similarities, token overlaps, edit distances, and domain-specific signals.
 """
 
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 import numpy as np
 import pandas as pd
 from rapidfuzz import fuzz
