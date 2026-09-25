@@ -46,23 +46,27 @@ def main():
     print("\n--- Step 1: Loading Trained Model & Calibrated Threshold ---")
     t0 = time.time()
     model_path = Path("models/pipeline_artifacts.joblib")
-    if not model_path.exists():
-        model_path = Path("help-me/pipeline_artifacts.joblib")
-
+    artifacts = None
     if model_path.exists():
-        artifacts = joblib.load(model_path)
-        print(f"✓ Loaded cached pipeline model weights from {model_path}")
-    else:
+        try:
+            artifacts = joblib.load(model_path)
+            print(f"✓ Loaded cached pipeline model weights from {model_path}")
+        except Exception as e:
+            print(f"⚠️ Notice: Cached weights could not be loaded ({e}). Training fresh in ~45 seconds...")
+            artifacts = None
+
+    if artifacts is None:
         artifacts = src.train_and_validate_pipeline(
             train_s1_samples=50000,
             val_s1_samples=10000,
             random_state=42,
             save_path="models/pipeline_artifacts.joblib",
-            load_cached=True
+            load_cached=False,
         )
-    
+
     lgb_model = artifacts["models"]["lightgbm"]
     summary_df = artifacts.get("benchmark_summary")
+
     
     if summary_df is not None and isinstance(summary_df, pd.DataFrame):
         lgb_row = summary_df[summary_df["model"] == "LightGBM"]

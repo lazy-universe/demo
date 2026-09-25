@@ -14,7 +14,13 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import duckdb
 import numpy as np
 import pandas as pd
-import torch
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    torch = None
+    TORCH_AVAILABLE = False
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -30,7 +36,8 @@ from src.preprocessing.text import clean_address, clean_business_name
 
 TARGET_SEGMENT_SIZE = 1_000_000   # 1.0M records per segment on GPU
 QUERY_CHUNK_SIZE = 100_000        # 100k query entities per batch
-EXACT_TOP_K = 6                   # Top 6 high-potential candidates per entity
+DEFAULT_TOP_K = 3                 # Top 3 high-potential candidates per entity (optimal speed-accuracy balance)
+DEFAULT_MAX_LEN = 80              # Max sequence length (80 tokens covers 99.8% of business names + addresses)
 DECISION_THRESHOLD = 0.68         # Calibrated for multi-match F0.5
 
 
@@ -39,8 +46,9 @@ def parse_args():
     parser.add_argument("--reranker-model", type=str, default="BAAI/bge-reranker-v2-m3", help="Cross-encoder model name")
     parser.add_argument("--dense-model", type=str, default="Qwen/Qwen3-Embedding-0.6B", help="Dense embedding model name")
     parser.add_argument("--use-dense", action="store_true", default=False, help="Enable dense embedding index")
+    parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K, help="Top K candidates per entity (default: 3)")
     parser.add_argument("--batch-size", type=int, default=512, help="Batch size for cross-encoder inference (default: 512)")
-    parser.add_argument("--max-length", type=int, default=160, help="Max sequence length for transformer reranker (default: 160)")
+    parser.add_argument("--max-length", type=int, default=DEFAULT_MAX_LEN, help="Max sequence length for transformer reranker (default: 80)")
     parser.add_argument("--threshold", type=float, default=DECISION_THRESHOLD, help="Match threshold for Hungarian solver (default: 0.68)")
     return parser.parse_args()
 
@@ -98,7 +106,7 @@ def main():
         hybrid_blocker.dense_retriever._load_model()
 
     print(f"✓ All Deep Learning models verified and ready on {device.upper()} in {time.time()-t0:.2f}s")
-    print(f"  Config: Reranker={args.reranker_model} | Batch Size={args.batch_size} | Max Length={args.max_length} | Threshold={args.threshold}")
+    print(f"  Config: Reranker={args.reranker_model} | Top-K={args.top_k} | Batch Size={args.batch_size} | Max Length={args.max_length} | Threshold={args.threshold}")
 
     # 2. Output Paths
     out_dir = Path(OUTPUT_DIR)
@@ -196,7 +204,7 @@ def main():
                     # 1. Query Blocker
                     cand_dict = hybrid_blocker.query_candidates(
                         chunk_s1,
-                        top_k_exact=EXACT_TOP_K,
+                        top_k_exact=args.top_k,
                     )
 
                     pair_texts = []

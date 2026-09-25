@@ -57,12 +57,19 @@ def save_trained_pipeline(artifacts: Dict[str, Any], filepath: Union[str, Path] 
 def load_trained_pipeline(filepath: Union[str, Path] = "models/pipeline_artifacts.joblib") -> Optional[Dict[str, Any]]:
     """
     Loads trained models, ensemble, threshold, and benchmark summary from disk.
+    Gracefully catches any unpickling or version differences and falls back to fresh training.
     """
     path = Path(filepath)
     if path.exists() and path.is_file():
-        print(f"✓ Loaded cached pipeline model weights from {path}")
-        return joblib.load(path)
+        try:
+            art = joblib.load(path)
+            print(f"✓ Loaded cached pipeline model weights from {path}")
+            return art
+        except Exception as e:
+            print(f"⚠️ Notice: Cached file {path} could not be loaded ({e}). Training fresh in ~45 seconds...")
+            return None
     return None
+
 
 
 
