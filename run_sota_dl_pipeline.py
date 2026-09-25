@@ -1,6 +1,6 @@
 """
 SOTA 2026 Deep Learning Submission Generator.
-End-to-End Candidate Blocker + Qwen3-Reranker (Cross-Attention Deep Learning) + Hungarian Bipartite Solver.
+End-to-End Candidate Blocker + BGE-M3 / Qwen3 Cross-Encoder Reranker + Hungarian Bipartite Solver.
 Outputs valid multi-match output/matching_results.tsv and output/candidate_pairs.tsv for all 1,732,544 test entities.
 """
 
@@ -36,7 +36,9 @@ DECISION_THRESHOLD = 0.68         # Calibrated for multi-match F0.5
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run SOTA Deep Learning Pipeline for Amazon ML Challenge 2026")
-    parser.add_argument("--use-dense", action="store_true", default=False, help="Enable Qwen3 dense embedding index")
+    parser.add_argument("--reranker-model", type=str, default="BAAI/bge-reranker-v2-m3", help="Cross-encoder model name")
+    parser.add_argument("--dense-model", type=str, default="Qwen/Qwen3-Embedding-0.6B", help="Dense embedding model name")
+    parser.add_argument("--use-dense", action="store_true", default=False, help="Enable dense embedding index")
     parser.add_argument("--batch-size", type=int, default=512, help="Batch size for cross-encoder inference (default: 512)")
     parser.add_argument("--max-length", type=int, default=160, help="Max sequence length for transformer reranker (default: 160)")
     parser.add_argument("--threshold", type=float, default=DECISION_THRESHOLD, help="Match threshold for Hungarian solver (default: 0.68)")
@@ -49,7 +51,7 @@ def main():
 
     print("=" * 75)
     print("🚀 SOTA 2026 PURE DEEP LEARNING SUBMISSION ENGINE")
-    print("   Candidate Blocker + Qwen3-Reranker Cross-Encoder + Hungarian Solver")
+    print("   Candidate Blocker + Cross-Encoder Deep Learning + Hungarian Solver")
     print("=" * 75)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -60,26 +62,43 @@ def main():
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
-    # 1. Initialize SOTA DL Components
-    print("\n--- Step 1: Initializing Deep Learning Models & Blocker ---")
+    # 1. Eager Initialize & Warm-Up SOTA DL Components in Step 1
+    print("\n--- Step 1: Initializing & Warming Up Deep Learning Models ---")
     t0 = time.time()
+
+    # Inspect HF Cache
+    hf_cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
+    if hf_cache_dir.exists():
+        cached_models = [d.name.replace("models--", "").replace("--", "/") for d in hf_cache_dir.glob("models--*")]
+        print(f"  HuggingFace Local Cache: {len(cached_models)} models found ({', '.join(cached_models[:3])})")
+    else:
+        print("  HuggingFace Local Cache: Initializing fresh directory")
+
     hybrid_blocker = TriHybridBlocker(
-        dense_model_name="Qwen/Qwen3-Embedding-0.6B",
+        dense_model_name=args.dense_model,
         dense_dim=512,
         use_dense=args.use_dense,
         use_learned_sparse=False,
         device=device,
     )
     reranker = QwenTransformerReranker(
-        model_name="Qwen/Qwen3-Reranker-0.6B",
+        model_name=args.reranker_model,
         fallback_model_name="BAAI/bge-reranker-v2-m3",
         max_length=args.max_length,
         batch_size=args.batch_size,
         device=device,
     )
     matcher = MultiMatchBipartiteSolver(default_threshold=args.threshold)
-    print(f"✓ Deep learning components initialized in {time.time()-t0:.2f}s")
-    print(f"  Configuration: Use Dense Index={args.use_dense} | Batch Size={args.batch_size} | Max Length={args.max_length} | Threshold={args.threshold}")
+
+    # Eager Model Warm-Up on GPU
+    print("  Loading & Warming up Cross-Encoder...")
+    reranker.warmup()
+    if args.use_dense and hybrid_blocker.dense_retriever is not None:
+        print("  Loading Dense Embedding Model...")
+        hybrid_blocker.dense_retriever._load_model()
+
+    print(f"✓ All Deep Learning models verified and ready on {device.upper()} in {time.time()-t0:.2f}s")
+    print(f"  Config: Reranker={args.reranker_model} | Batch Size={args.batch_size} | Max Length={args.max_length} | Threshold={args.threshold}")
 
     # 2. Output Paths
     out_dir = Path(OUTPUT_DIR)
@@ -200,7 +219,7 @@ def main():
                             pair_texts.append((s1_txt, t_txt))
                             pair_meta.append((s1_id, tid))
 
-                    # 2. Score with Qwen3-Reranker Cross-Encoder
+                    # 2. Score with Cross-Encoder
                     if pair_texts:
                         seg_pairs_scored += len(pair_texts)
                         probs = reranker.predict_pair_probabilities(pair_texts, show_progress=True)

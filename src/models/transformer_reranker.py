@@ -1,17 +1,26 @@
 """
 Cross-Encoder Transformer Pairwise Reranker for Entity Resolution.
-Supports Qwen3-Reranker-0.6B / GTE-Reranker / BGE-Reranker-v2-M3 (Apache 2.0).
+Supports BAAI/bge-reranker-v2-m3 / Qwen3-Reranker (Apache 2.0).
 Computes full sequence cross-attention on GPU in FP16 to generate calibrated match probabilities.
 """
 
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
+import os
+import time
 import numpy as np
+
 try:
     import torch
     TORCH_AVAILABLE = True
 except ImportError:
     torch = None
     TORCH_AVAILABLE = False
+
+try:
+    from sentence_transformers import CrossEncoder
+    CROSS_ENCODER_AVAILABLE = True
+except ImportError:
+    CROSS_ENCODER_AVAILABLE = False
 
 try:
     from transformers import AutoModelForSequenceClassification, AutoTokenizer
@@ -30,10 +39,10 @@ class QwenTransformerReranker:
 
     def __init__(
         self,
-        model_name: str = "Qwen/Qwen3-Reranker-0.6B",
+        model_name: str = "BAAI/bge-reranker-v2-m3",
         fallback_model_name: str = "BAAI/bge-reranker-v2-m3",
-        max_length: int = 256,
-        batch_size: int = 256,
+        max_length: int = 160,
+        batch_size: int = 512,
         device: Optional[str] = None,
     ):
         if device is None:
@@ -45,33 +54,82 @@ class QwenTransformerReranker:
         self.fallback_model_name = fallback_model_name
         self.max_length = max_length
         self.batch_size = batch_size
+        self.cross_encoder = None
         self.tokenizer = None
         self.model = None
 
     def _load_model(self):
-        if self.model is not None or not TRANSFORMERS_AVAILABLE:
+        """Eagerly loads and caches the cross-encoder model onto GPU/CPU in FP16."""
+        if self.cross_encoder is not None or self.model is not None:
             return
 
-        print(f"  [Reranker] Loading cross-encoder {self.model_name} on {self.device}...")
-        try:
-            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
-            self.model = AutoModelForSequenceClassification.from_pretrained(
-                self.model_name,
-                trust_remote_code=True,
-                torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
-            ).to(self.device)
-            self.model.eval()
-            print(f"  ✓ Loaded {self.model_name}")
-        except Exception as e:
-            print(f"  ⚠️ Warning: Failed to load {self.model_name} ({e}). Falling back to {self.fallback_model_name}...")
-            self.tokenizer = AutoTokenizer.from_pretrained(self.fallback_model_name, trust_remote_code=True)
-            self.model = AutoModelForSequenceClassification.from_pretrained(
-                self.fallback_model_name,
-                trust_remote_code=True,
-                torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
-            ).to(self.device)
-            self.model.eval()
-            print(f"  ✓ Loaded fallback {self.fallback_model_name}")
+        t0 = time.time()
+        print(f"  [Reranker] Loading Cross-Encoder {self.model_name} on {self.device}...")
+
+        # 1. Try SentenceTransformers CrossEncoder (Preferred & highly optimized)
+        if CROSS_ENCODER_AVAILABLE:
+            try:
+                model_kwargs = {"torch_dtype": torch.float16 if self.device == "cuda" else torch.float32}
+                self.cross_encoder = CrossEncoder(
+                    self.model_name,
+                    max_length=self.max_length,
+                    device=self.device,
+                    automodel_args=model_kwargs,
+                    trust_remote_code=True,
+                )
+                print(f"  ✓ Loaded {self.model_name} via SentenceTransformers CrossEncoder in {time.time()-t0:.2f}s")
+                return
+            except Exception as e:
+                print(f"  ℹ️ CrossEncoder notice: {e}. Trying transformers AutoModel...")
+
+        # 2. Fallback to Transformers AutoModelForSequenceClassification
+        if TRANSFORMERS_AVAILABLE:
+            try:
+                self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
+                if self.tokenizer.pad_token is None:
+                    self.tokenizer.pad_token = self.tokenizer.eos_token or "<|endoftext|>"
+                    self.tokenizer.pad_token_id = self.tokenizer.convert_tokens_to_ids(self.tokenizer.pad_token)
+
+                self.model = AutoModelForSequenceClassification.from_pretrained(
+                    self.model_name,
+                    trust_remote_code=True,
+                    torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
+                )
+                if hasattr(self.model, "config") and getattr(self.model.config, "pad_token_id", None) is None:
+                    self.model.config.pad_token_id = self.tokenizer.pad_token_id
+
+                self.model.to(self.device)
+                self.model.eval()
+                print(f"  ✓ Loaded {self.model_name} via Transformers in {time.time()-t0:.2f}s")
+                return
+            except Exception as e:
+                print(f"  ⚠️ Warning: Failed to load {self.model_name} ({e}). Falling back to {self.fallback_model_name}...")
+                self.tokenizer = AutoTokenizer.from_pretrained(self.fallback_model_name, trust_remote_code=True)
+                if self.tokenizer.pad_token is None:
+                    self.tokenizer.pad_token = self.tokenizer.eos_token or "<|endoftext|>"
+                    self.tokenizer.pad_token_id = self.tokenizer.convert_tokens_to_ids(self.tokenizer.pad_token)
+
+                self.model = AutoModelForSequenceClassification.from_pretrained(
+                    self.fallback_model_name,
+                    trust_remote_code=True,
+                    torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
+                )
+                if hasattr(self.model, "config") and getattr(self.model.config, "pad_token_id", None) is None:
+                    self.model.config.pad_token_id = self.tokenizer.pad_token_id
+
+                self.model.to(self.device)
+                self.model.eval()
+                print(f"  ✓ Loaded fallback {self.fallback_model_name} in {time.time()-t0:.2f}s")
+
+    def warmup(self):
+        """Warm up GPU memory and verify inference execution."""
+        self._load_model()
+        test_pairs = [
+            ("Business: Amazon HQ | Address: Seattle WA USA", "Business: Amazon Web Services | Address: Seattle Washington USA"),
+            ("Business: Cafe Bakery | Address: Paris France", "Business: Steel Manufacturing | Address: Mumbai India"),
+        ]
+        test_probs = self.predict_pair_probabilities(test_pairs, show_progress=False)
+        print(f"  ✓ Reranker GPU warm-up successful (Sample scores: {test_probs[0]:.4f} vs {test_probs[1]:.4f})")
 
     def format_pair_text(self, name1: str, addr1: str, name2: str, addr2: str) -> Tuple[str, str]:
         """Formats record pair into standardized cross-encoder text inputs."""
@@ -93,18 +151,33 @@ class QwenTransformerReranker:
             return np.array([], dtype=np.float32)
 
         self._load_model()
+        bs = batch_size or self.batch_size
+
+        # 1. Native CrossEncoder inference
+        if self.cross_encoder is not None:
+            raw_scores = self.cross_encoder.predict(
+                pairs,
+                batch_size=bs,
+                show_progress_bar=show_progress,
+                convert_to_numpy=True,
+            )
+            # Sigmoid conversion if raw logits
+            if np.min(raw_scores) < 0.0 or np.max(raw_scores) > 1.0:
+                probs = 1.0 / (1.0 + np.exp(-raw_scores))
+            else:
+                probs = raw_scores
+            return probs.astype(np.float32)
+
+        # 2. Transformers SequenceClassification inference
         if self.model is None:
-            # Fallback simple scoring if model cannot be loaded
             return np.ones(len(pairs), dtype=np.float32) * 0.5
 
-        bs = batch_size or self.batch_size
         probabilities = []
-
         try:
             from tqdm import tqdm
             iterator = range(0, len(pairs), bs)
             if show_progress and len(pairs) > bs:
-                iterator = tqdm(iterator, desc="  ⚡ Qwen3-Reranker Inference", unit="batch", leave=False)
+                iterator = tqdm(iterator, desc="  ⚡ Reranker Inference", unit="batch", leave=False)
         except ImportError:
             iterator = range(0, len(pairs), bs)
 
@@ -140,4 +213,3 @@ class QwenTransformerReranker:
                     probabilities.extend(probs.tolist())
 
         return np.array(probabilities, dtype=np.float32)
-
