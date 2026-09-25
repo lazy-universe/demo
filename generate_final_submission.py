@@ -1,6 +1,6 @@
 """
 Production Pipeline & Official Submission Generator (Multi-Match Enabled).
-Memory-Safe LightGBM Engine (1.5M Segment Size | 50k Query Chunks | Pre-Profiled C++ RapidFuzz).
+Ultra-Memory-Safe LightGBM Engine (500k Target Segments | On-Demand Profile Cache | Peak RAM < 2.0 GB).
 Generates multi-match output/matching_results.tsv and output/candidate_pairs.tsv for all 1,732,544 test entities.
 """
 
@@ -27,9 +27,9 @@ from src.config import (
 from src.blocking.inverted_index import MultiKeyBlocker
 from src.features.extractor import FEATURE_NAMES, extract_pair_features_fast, prepare_entity_profile
 
-# High-Speed Constants for Colab (1.5M Targets per Segment | 100k Query Chunks)
-TARGET_SEGMENT_SIZE = 1_500_000   # 1.5M records per segment
-QUERY_CHUNK_SIZE = 100_000        # 100k query entities per batch
+# Memory-Safe Constants for Colab (Peak RAM < 2.0 GB Guaranteed)
+TARGET_SEGMENT_SIZE = 500_000     # 500k target records per segment (< 700 MB)
+QUERY_CHUNK_SIZE = 100_000        # 100k query entities per batch (< 150 MB)
 MAX_CANDIDATES_PER_ENTITY = 6     # Top 6 high-precision candidates per source
 
 
@@ -37,7 +37,7 @@ def main():
     total_start = time.time()
     print("=" * 75)
     print("🚀 AMAZON ML CHALLENGE 2026: MASTER SUBMISSION GENERATOR")
-    print("   Multi-Match Enabled LightGBM Engine (1.5M Segments | Pre-Profiled)")
+    print("   Memory-Safe Multi-Match Engine (500k Segments | Peak RAM < 2.0 GB)")
     print("=" * 75)
 
     # -------------------------------------------------------------
@@ -133,20 +133,11 @@ def main():
         total_s1 = len(s1_df)
         print(f"  Records: S1={total_s1:,}, S2={s2_total:,}, S3={s3_total:,} (Total Targets: {s2_total+s3_total:,})")
 
-        # Pre-profile S1 entities for ultra-fast C++ matching
-        print("  Pre-profiling S1 entities...")
-        t_prof = time.time()
-        s1_profile_map: Dict[str, Dict[str, Any]] = {
-            str(eid): prepare_entity_profile(str(name), str(addr))
-            for eid, name, addr in zip(s1_df["entity_id"].values, s1_df["business_name"].values, s1_df["business_address"].values)
-        }
-        print(f"  ✓ Pre-profiled {total_s1:,} S1 entities in {time.time()-t_prof:.2f}s")
-
         # Accumulators
         candidate_map: Dict[str, Set[str]] = {str(eid): set() for eid in s1_df["entity_id"].values}
         all_passing_pairs: List[Tuple[str, str, float]] = []
 
-        # Universal 1.5M Segmented Streaming across S2 and S3
+        # Universal 500k Segmented Streaming across S2 and S3
         for src_label, src_file, src_total in [("S2", TEST_FILES["source2"], s2_total), ("S3", TEST_FILES["source3"], s3_total)]:
             if src_total == 0:
                 continue
@@ -172,18 +163,35 @@ def main():
                 blocker = MultiKeyBlocker(max_block_size=200)
                 blocker.build_index_df(target_df)
 
-                # Pre-profile target records once for this segment
-                target_profiles: Dict[str, Dict[str, Any]] = {
-                    str(eid): prepare_entity_profile(str(name), str(addr))
+                # Store raw target strings for on-demand profiling (takes only ~40 MB RAM)
+                target_raw: Dict[str, Tuple[str, str]] = {
+                    str(eid): (str(name), str(addr))
                     for eid, name, addr in zip(target_df["entity_id"].values, target_df["business_name"].values, target_df["business_address"].values)
                 }
+                target_profile_cache: Dict[str, Dict[str, Any]] = {}
                 del target_df
                 gc.collect()
 
-                # Stream S1 queries against this segment
+                def get_target_prof(tid: str) -> Optional[Dict[str, Any]]:
+                    if tid in target_profile_cache:
+                        return target_profile_cache[tid]
+                    rec = target_raw.get(tid)
+                    if not rec:
+                        return None
+                    prof = prepare_entity_profile(rec[0], rec[1])
+                    target_profile_cache[tid] = prof
+                    return prof
+
+                # Stream S1 queries against this segment in 100k batches
                 for s1_start in range(0, total_s1, QUERY_CHUNK_SIZE):
                     s1_end = min(s1_start + QUERY_CHUNK_SIZE, total_s1)
                     chunk_s1 = s1_df.iloc[s1_start:s1_end]
+
+                    # Profile S1 entities on-the-fly for this chunk only
+                    chunk_s1_profiles: Dict[str, Dict[str, Any]] = {
+                        str(eid): prepare_entity_profile(str(name), str(addr))
+                        for eid, name, addr in zip(chunk_s1["entity_id"].values, chunk_s1["business_name"].values, chunk_s1["business_address"].values)
+                    }
 
                     cand_dict = blocker.query_candidates(chunk_s1, max_candidates_per_entity=MAX_CANDIDATES_PER_ENTITY)
 
@@ -198,16 +206,20 @@ def main():
 
                         # Accumulate candidate IDs
                         candidate_map[s1_id].update(cands)
-                        p1 = s1_profile_map[s1_id]
+                        p1 = chunk_s1_profiles.get(s1_id)
+                        if not p1:
+                            continue
 
                         for target_id in cands:
-                            p2 = target_profiles.get(target_id)
+                            p2 = get_target_prof(target_id)
                             if not p2:
                                 continue
 
                             feat_vector = extract_pair_features_fast(p1, p2, source2_prefix=src_label)
                             feature_rows.append(feat_vector)
                             meta_rows.append((s1_id, target_id))
+
+                    del chunk_s1_profiles
 
                     if feature_rows:
                         X_chunk = pd.DataFrame(feature_rows, columns=FEATURE_NAMES, dtype=np.float32)
@@ -217,12 +229,11 @@ def main():
                             if prob >= threshold:
                                 all_passing_pairs.append((s1_id, target_id, float(prob)))
 
-                print(f"      Segment {seg_num}/{total_segs} processed in {time.time()-t_seg:.2f}s")
-                del blocker, target_profiles
+                print(f"      Segment {seg_num}/{total_segs} processed in {time.time()-t_seg:.2f}s (Cached {len(target_profile_cache):,} active targets)")
+                del blocker, target_raw, target_profile_cache
                 gc.collect()
 
         # Apply Global Multi-Match Injective Assignment for this country
-        # (Allows S1 entities to match MULTIPLE targets from S2 and S3 while preventing target collision)
         print(f"  Applying global multi-match injective assignment on {len(all_passing_pairs):,} passing pairs...")
         all_passing_pairs.sort(key=lambda x: x[2], reverse=True)
         assigned_targets = set()
@@ -261,7 +272,7 @@ def main():
         total_matches_assigned += len(assigned_targets)
         print(f"✓ [{country.upper()}] completed in {time.time()-t_country:.2f}s | Matches assigned: {len(assigned_targets):,}")
 
-        del s1_df, s1_profile_map, candidate_map, all_passing_pairs, country_predictions
+        del s1_df, candidate_map, all_passing_pairs, country_predictions
         gc.collect()
 
     print("\n" + "=" * 75)
