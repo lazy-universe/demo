@@ -138,23 +138,40 @@ class GPUDenseRetriever:
 
         return embeddings.astype(np.float32)
 
-    def build_faiss_index(self, target_embeddings: np.ndarray) -> Any:
+    def build_index(self, target_df: pd.DataFrame, show_progress_bar: bool = True):
         """
-        Constructs a FAISS inner-product (cosine similarity) index on GPU or CPU.
+        Builds FAISS cosine index for target records and caches in memory/GPU.
         """
-        d = target_embeddings.shape[1]
-        index = faiss.IndexFlatIP(d)
+        self._load_model()
+        self.target_eids = [str(x).strip() for x in target_df["entity_id"].values]
+        target_texts = self.format_texts(target_df, is_query=False)
+        target_embeddings = self.encode_texts(target_texts, is_query=False, show_progress_bar=show_progress_bar)
+        self.current_index = self.build_faiss_index(target_embeddings)
 
-        if self.device == "cuda" and self.gpu_res is not None and hasattr(faiss, "index_cpu_to_gpu"):
-            try:
-                gpu_index = faiss.index_cpu_to_gpu(self.gpu_res, 0, index)
-                gpu_index.add(target_embeddings)
-                return gpu_index
-            except Exception:
-                pass
+    def query_candidates(
+        self,
+        query_df: pd.DataFrame,
+        top_k: int = 6,
+        show_progress_bar: bool = False,
+    ) -> Dict[str, Set[str]]:
+        """
+        Queries the pre-built FAISS index using query embeddings.
+        """
+        if not hasattr(self, "current_index") or self.current_index is None:
+            return {str(x).strip(): set() for x in query_df["entity_id"].values}
 
-        index.add(target_embeddings)
-        return index
+        query_eids = [str(x).strip() for x in query_df["entity_id"].values]
+        query_texts = self.format_texts(query_df, is_query=True)
+        q_embs = self.encode_texts(query_texts, is_query=True, show_progress_bar=show_progress_bar)
+
+        _, top_indices = self.current_index.search(q_embs, top_k)
+
+        candidates: Dict[str, Set[str]] = {}
+        for q_id, top_idx_row in zip(query_eids, top_indices):
+            cand_set = {self.target_eids[idx] for idx in top_idx_row if 0 <= idx < len(self.target_eids)}
+            candidates[q_id] = cand_set
+
+        return candidates
 
     def query_dense_candidates(
         self,
@@ -162,25 +179,7 @@ class GPUDenseRetriever:
         target_df: pd.DataFrame,
         top_k: int = 8,
     ) -> Dict[str, Set[str]]:
-        """
-        End-to-end dense retrieval: encodes queries and targets, queries FAISS-GPU,
-        and returns a dictionary mapping query entity_id -> Set of top_k candidate target IDs.
-        """
-        query_eids = [str(x).strip() for x in query_df["entity_id"].values]
-        target_eids = [str(x).strip() for x in target_df["entity_id"].values]
+        """Legacy helper for backward compatibility."""
+        self.build_index(target_df, show_progress_bar=True)
+        return self.query_candidates(query_df, top_k=top_k, show_progress_bar=False)
 
-        query_texts = self.format_texts(query_df, is_query=True)
-        target_texts = self.format_texts(target_df, is_query=False)
-
-        q_embs = self.encode_texts(query_texts, is_query=True)
-        t_embs = self.encode_texts(target_texts, is_query=False)
-
-        index = self.build_faiss_index(t_embs)
-        _, top_indices = index.search(q_embs, top_k)
-
-        candidates: Dict[str, Set[str]] = {}
-        for q_id, top_idx_row in zip(query_eids, top_indices):
-            cand_set = {target_eids[idx] for idx in top_idx_row if 0 <= idx < len(target_eids)}
-            candidates[q_id] = cand_set
-
-        return candidates

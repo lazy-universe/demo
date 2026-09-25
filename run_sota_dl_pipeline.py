@@ -1,6 +1,6 @@
 """
 SOTA 2026 Deep Learning Submission Generator.
-End-to-End Qwen3-Embedding (FAISS-GPU) + Qwen3-Reranker (Cross-Attention) + Hungarian Bipartite Solver.
+End-to-End Candidate Blocker + Qwen3-Reranker (Cross-Attention Deep Learning) + Hungarian Bipartite Solver.
 Outputs valid multi-match output/matching_results.tsv and output/candidate_pairs.tsv for all 1,732,544 test entities.
 """
 
@@ -8,6 +8,7 @@ import os
 import sys
 import time
 import gc
+import argparse
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 import duckdb
@@ -29,40 +30,56 @@ from src.preprocessing.text import clean_address, clean_business_name
 
 TARGET_SEGMENT_SIZE = 1_000_000   # 1.0M records per segment on GPU
 QUERY_CHUNK_SIZE = 100_000        # 100k query entities per batch
-DENSE_TOP_K = 6                   # Top 6 dense candidates from Qwen3
-EXACT_TOP_K = 4                   # Top 4 exact lexical candidates
+EXACT_TOP_K = 6                   # Top 6 high-potential candidates per entity
+DECISION_THRESHOLD = 0.68         # Calibrated for multi-match F0.5
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run SOTA Deep Learning Pipeline for Amazon ML Challenge 2026")
+    parser.add_argument("--use-dense", action="store_true", default=False, help="Enable Qwen3 dense embedding index")
+    parser.add_argument("--batch-size", type=int, default=512, help="Batch size for cross-encoder inference (default: 512)")
+    parser.add_argument("--max-length", type=int, default=160, help="Max sequence length for transformer reranker (default: 160)")
+    parser.add_argument("--threshold", type=float, default=DECISION_THRESHOLD, help="Match threshold for Hungarian solver (default: 0.68)")
+    return parser.parse_args()
 
 
 def main():
+    args = parse_args()
     total_start = time.time()
+
     print("=" * 75)
     print("🚀 SOTA 2026 PURE DEEP LEARNING SUBMISSION ENGINE")
-    print("   Qwen3-Embedding (FAISS-GPU) + Qwen3-Reranker + Hungarian Solver")
+    print("   Candidate Blocker + Qwen3-Reranker Cross-Encoder + Hungarian Solver")
     print("=" * 75)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Active Hardware Device: {device.upper()}")
     if device == "cuda":
-        print(f"GPU Model: {torch.cuda.get_device_name(0)}")
+        print(f"GPU Model:              {torch.cuda.get_device_name(0)}")
+        print(f"Total VRAM:             {torch.cuda.get_device_properties(0).total_memory / (1024**3):.2f} GB")
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
     # 1. Initialize SOTA DL Components
-    print("\n--- Step 1: Initializing Foundation Models ---")
+    print("\n--- Step 1: Initializing Deep Learning Models & Blocker ---")
     t0 = time.time()
     hybrid_blocker = TriHybridBlocker(
         dense_model_name="Qwen/Qwen3-Embedding-0.6B",
         dense_dim=512,
+        use_dense=args.use_dense,
         use_learned_sparse=False,
         device=device,
     )
     reranker = QwenTransformerReranker(
         model_name="Qwen/Qwen3-Reranker-0.6B",
         fallback_model_name="BAAI/bge-reranker-v2-m3",
-        max_length=256,
-        batch_size=256,
+        max_length=args.max_length,
+        batch_size=args.batch_size,
         device=device,
     )
-    matcher = MultiMatchBipartiteSolver(default_threshold=0.68)
-    print(f"✓ Models and Hungarian solver initialized in {time.time()-t0:.2f}s")
+    matcher = MultiMatchBipartiteSolver(default_threshold=args.threshold)
+    print(f"✓ Deep learning components initialized in {time.time()-t0:.2f}s")
+    print(f"  Configuration: Use Dense Index={args.use_dense} | Batch Size={args.batch_size} | Max Length={args.max_length} | Threshold={args.threshold}")
 
     # 2. Output Paths
     out_dir = Path(OUTPUT_DIR)
@@ -141,7 +158,7 @@ def main():
                 """).df()
                 con.close()
 
-                # Build Hybrid Blocker Index (Inverted Index + Dense Embeddings)
+                # Build Blocker Index
                 hybrid_blocker.build_index(target_df)
 
                 target_raw: Dict[str, Tuple[str, str]] = {
@@ -152,15 +169,14 @@ def main():
                 gc.collect()
 
                 # Stream S1 Queries in Chunks
+                seg_pairs_scored = 0
                 for s1_start in range(0, total_s1, QUERY_CHUNK_SIZE):
                     s1_end = min(s1_start + QUERY_CHUNK_SIZE, total_s1)
                     chunk_s1 = s1_df.iloc[s1_start:s1_end]
 
-                    # 1. Query Hybrid Blocker (Dense FAISS-GPU + Exact Lexical)
+                    # 1. Query Blocker
                     cand_dict = hybrid_blocker.query_candidates(
                         chunk_s1,
-                        target_df=pd.DataFrame([{"entity_id": k, "business_name": v[0], "business_address": v[1], "country": country} for k, v in target_raw.items()]),
-                        top_k_dense=DENSE_TOP_K,
                         top_k_exact=EXACT_TOP_K,
                     )
 
@@ -186,19 +202,20 @@ def main():
 
                     # 2. Score with Qwen3-Reranker Cross-Encoder
                     if pair_texts:
-                        probs = reranker.predict_pair_probabilities(pair_texts)
+                        seg_pairs_scored += len(pair_texts)
+                        probs = reranker.predict_pair_probabilities(pair_texts, show_progress=True)
                         for (s1_id, tid), prob in zip(pair_meta, probs):
-                            if prob >= 0.68:
+                            if prob >= args.threshold:
                                 all_passing_pairs.append((s1_id, tid, float(prob)))
 
-                print(f"      Segment {seg_num}/{total_segs} processed in {time.time()-t_seg:.2f}s")
+                print(f"      Segment {seg_num}/{total_segs} processed {seg_pairs_scored:,} candidate pairs in {time.time()-t_seg:.2f}s")
                 del target_raw
                 gc.collect()
 
         # 4. Multi-Match Hungarian / Bipartite Assignment
-        print(f"  Applying Multi-Match Hungarian assignment on {len(all_passing_pairs):,} candidate pairs...")
+        print(f"  Applying Multi-Match Hungarian assignment on {len(all_passing_pairs):,} passing pairs...")
         all_s1_set = set(s1_df["entity_id"].values)
-        predictions = matcher.solve_multi_match_assignment(all_passing_pairs, all_s1_set, threshold=0.68)
+        predictions = matcher.solve_multi_match_assignment(all_passing_pairs, all_s1_set, threshold=args.threshold)
 
         total_matched = sum(1 for m in predictions.values() if m)
         multi_matched = sum(1 for m in predictions.values() if len(m) > 1)

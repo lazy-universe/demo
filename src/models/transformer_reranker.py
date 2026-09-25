@@ -83,10 +83,15 @@ class QwenTransformerReranker:
         self,
         pairs: List[Tuple[str, str]],
         batch_size: Optional[int] = None,
+        show_progress: bool = True,
     ) -> np.ndarray:
         """
         Predicts binary match probabilities P(match | pair) for a list of (text1, text2) tuples.
+        Includes live tqdm progress bar showing throughput and ETA.
         """
+        if not pairs:
+            return np.array([], dtype=np.float32)
+
         self._load_model()
         if self.model is None:
             # Fallback simple scoring if model cannot be loaded
@@ -95,29 +100,44 @@ class QwenTransformerReranker:
         bs = batch_size or self.batch_size
         probabilities = []
 
-        for i in range(0, len(pairs), bs):
-            batch = pairs[i:i + bs]
-            texts_a = [p[0] for p in batch]
-            texts_b = [p[1] for p in batch]
+        try:
+            from tqdm import tqdm
+            iterator = range(0, len(pairs), bs)
+            if show_progress and len(pairs) > bs:
+                iterator = tqdm(iterator, desc="  ⚡ Qwen3-Reranker Inference", unit="batch", leave=False)
+        except ImportError:
+            iterator = range(0, len(pairs), bs)
 
-            inputs = self.tokenizer(
-                texts_a,
-                texts_b,
-                padding=True,
-                truncation=True,
-                max_length=self.max_length,
-                return_tensors="pt",
-            ).to(self.device)
+        inference_ctx = torch.inference_mode if hasattr(torch, "inference_mode") else torch.no_grad
 
-            outputs = self.model(**inputs)
-            logits = outputs.logits
-            if logits.shape[-1] == 1:
-                probs = torch.sigmoid(logits.squeeze(-1)).cpu().numpy()
-            elif logits.shape[-1] == 2:
-                probs = torch.softmax(logits, dim=-1)[:, 1].cpu().numpy()
-            else:
-                probs = torch.sigmoid(logits[:, 0]).cpu().numpy()
+        with inference_ctx():
+            for i in iterator:
+                batch = pairs[i:i + bs]
+                texts_a = [p[0] for p in batch]
+                texts_b = [p[1] for p in batch]
 
-            probabilities.extend(probs.tolist())
+                inputs = self.tokenizer(
+                    texts_a,
+                    texts_b,
+                    padding=True,
+                    truncation=True,
+                    max_length=self.max_length,
+                    return_tensors="pt",
+                ).to(self.device)
+
+                outputs = self.model(**inputs)
+                logits = outputs.logits
+                if logits.shape[-1] == 1:
+                    probs = torch.sigmoid(logits.squeeze(-1)).detach().cpu().numpy()
+                elif logits.shape[-1] == 2:
+                    probs = torch.softmax(logits, dim=-1)[:, 1].detach().cpu().numpy()
+                else:
+                    probs = torch.sigmoid(logits[:, 0]).detach().cpu().numpy()
+
+                if probs.ndim == 0:
+                    probabilities.append(float(probs))
+                else:
+                    probabilities.extend(probs.tolist())
 
         return np.array(probabilities, dtype=np.float32)
+
