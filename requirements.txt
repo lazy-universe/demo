@@ -1,4 +1,9 @@
-# Amazon ML Challenge 2026 Core Requirements
+# Amazon ML Challenge 2026 - Production Deep Learning & Tabular Stack
+torch>=2.0.0
+transformers>=4.40.0
+sentence-transformers>=3.0.0
+faiss-cpu>=1.7.4
+scipy>=1.10.0
 rapidfuzz>=3.0.0
 duckdb>=0.9.0
 lightgbm>=4.0.0

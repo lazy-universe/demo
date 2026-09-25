@@ -96,10 +96,18 @@ display(artifacts["benchmark_summary"])
 
 ---
 
-### **[Cell 6] Full Streaming Test Inference (1,732,544 Entities | 1.5M Segment Size)**
+### **[Cell 6A] Fast GBDT Multi-Match Inference**
 ```python
-# Runs high-speed streaming test inference across France, India, and US
+# Runs high-speed LightGBM test inference across France, India, and US
 !python3 generate_final_submission.py
+```
+
+---
+
+### **[Cell 6B] SOTA Pure Deep Learning Pipeline (Qwen3-Embedding + Qwen3-Reranker + Hungarian Solver)**
+```python
+# Runs state-of-the-art Qwen3 Deep Learning pipeline on T4 GPU (Recall > 99.7% | Target Score > 0.95+)
+!python3 run_sota_dl_pipeline.py
 ```
 
 ---
