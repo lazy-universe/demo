@@ -5,7 +5,7 @@ Creates leak-free 80/20 train/validation splits from training files.
 
 import os
 from pathlib import Path
-from typing import Dict, Optional, Set, Tuple
+from typing import Dict, Optional, Set, Tuple, Union
 import numpy as np
 import pandas as pd
 
@@ -107,6 +107,9 @@ class ValidationSplitManager:
         df_val_gt.to_csv(self.val_gt_path, sep=DELIMITER, index=False)
 
         return self.get_split_paths()
+
+    # Alias for convenience
+    create_isolated_split = create_splits
 
     def get_split_paths(self) -> Dict[str, Path]:
         """Returns dictionary of paths to the split files."""
