@@ -27,9 +27,9 @@ from src.config import (
 from src.blocking.inverted_index import MultiKeyBlocker
 from src.features.extractor import FEATURE_NAMES, extract_pair_features_fast, prepare_entity_profile
 
-# High-Speed Constants for Colab (1.5M Targets per Segment)
+# High-Speed Constants for Colab (1.5M Targets per Segment | 100k Query Chunks)
 TARGET_SEGMENT_SIZE = 1_500_000   # 1.5M records per segment
-QUERY_CHUNK_SIZE = 50_000         # 50k query entities per batch
+QUERY_CHUNK_SIZE = 100_000        # 100k query entities per batch
 MAX_CANDIDATES_PER_ENTITY = 6     # Top 6 high-precision candidates per source
 
 
