@@ -136,23 +136,30 @@ def load_sample(
 
 def load_tsv_sampled(
     filepath: Union[str, Path],
-    n_samples: int = 10_000,
+    n_samples: Optional[int] = 10_000,
     random_state: Optional[int] = 42,
 ) -> pd.DataFrame:
     """
-    Uniform reservoir sampling of any TSV file via DuckDB for fast sampling without loading entire files into RAM.
+    Uniform reservoir sampling of any TSV file via DuckDB, or full loading if n_samples=None.
     """
     filepath = str(filepath)
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"File not found: {filepath}")
 
-    seed_clause = f"(reservoir, {random_state})" if random_state is not None else "(reservoir)"
     con = duckdb.connect()
-    query = f"""
-        SELECT *
-        FROM read_csv('{filepath}', delim='\\t', header=true, all_varchar=true)
-        USING SAMPLE {n_samples} ROWS {seed_clause}
-    """
+    con.execute("SET enable_progress_bar=false;")
+    if n_samples is not None and n_samples > 0:
+        seed_clause = f"(reservoir, {random_state})" if random_state is not None else "(reservoir)"
+        query = f"""
+            SELECT *
+            FROM read_csv('{filepath}', delim='\\t', header=true, all_varchar=true)
+            USING SAMPLE {n_samples} ROWS {seed_clause}
+        """
+    else:
+        query = f"""
+            SELECT *
+            FROM read_csv('{filepath}', delim='\\t', header=true, all_varchar=true)
+        """
     df = con.execute(query).df()
     con.close()
     return df

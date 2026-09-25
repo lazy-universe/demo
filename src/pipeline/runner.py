@@ -120,14 +120,15 @@ def save_submission_files(
 
 
 def train_and_validate_pipeline(
-    train_s1_samples: int = 50_000,
-    val_s1_samples: int = 15_000,
+    train_s1_samples: Optional[int] = None,
+    val_s1_samples: Optional[int] = 20_000,
     random_state: int = 42,
     save_path: Optional[Union[str, Path]] = "models/pipeline_artifacts.joblib",
     load_cached: bool = False,
 ) -> Dict[str, Any]:
     """
-    Trains models on the 80% train split and evaluates/calibrates on the 20% holdout split.
+    Trains models on the 90% train split and evaluates/calibrates on the 10% holdout split.
+    If train_s1_samples is None, utilizes 100% of all entities in the training split.
     Can load cached model weights to skip retraining if load_cached=True.
     """
     if load_cached and save_path:
@@ -136,7 +137,7 @@ def train_and_validate_pipeline(
             return cached
 
     print("=" * 70)
-    print("🚀 Training & Validation Pipeline (80/20 Holdout Split)")
+    print("🚀 Training & Validation Pipeline (90/10 Holdout Split)")
     print("=" * 70)
 
     # 1. Load Data
