@@ -29,7 +29,7 @@ class ValidationSplitManager:
     def __init__(
         self,
         splits_dir: Union[str, Path] = SPLITS_DIR,
-        train_ratio: float = 0.80,
+        train_ratio: float = 0.90,
         random_seed: int = DEFAULT_RANDOM_SEED,
     ):
         self.splits_dir = Path(splits_dir)

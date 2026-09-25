@@ -26,9 +26,9 @@ from src.config import (
 from src.blocking.inverted_index import MultiKeyBlocker
 from src.features.extractor import FEATURE_NAMES, extract_pair_features_fast, prepare_entity_profile
 
-# Memory-Safe Universal Constants (Guarantees RAM stays under 1.5 GB)
-TARGET_SEGMENT_SIZE = 500_000     # 500k records per segment (smaller than France's 703k)
-QUERY_CHUNK_SIZE = 25_000         # 25k query entities per batch
+# High-Speed Constants for Colab (1.5M Targets per Segment)
+TARGET_SEGMENT_SIZE = 1_500_000   # 1.5M records per segment
+QUERY_CHUNK_SIZE = 50_000         # 50k query entities per batch
 MAX_CANDIDATES_PER_ENTITY = 6     # Top 6 high-precision candidates
 
 
@@ -36,7 +36,7 @@ def main():
     total_start = time.time()
     print("=" * 75)
     print("🚀 AMAZON ML CHALLENGE 2026: MASTER SUBMISSION GENERATOR")
-    print("   Memory-Safe LightGBM Engine (500k Segments | Peak RAM < 1.5 GB)")
+    print("   High-Speed LightGBM Engine (1.5M Segments | 50k Query Chunks)")
     print("=" * 75)
 
     # -------------------------------------------------------------

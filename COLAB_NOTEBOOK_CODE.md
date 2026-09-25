@@ -1,4 +1,4 @@
-# 🚀 Google Colab Master Execution Guide
+# 🚀 Google Colab Master Execution Guide (90/10 Split & High-Speed Engine)
 
 This document contains each clean code block ready to copy and paste directly into your Google Colab notebook cells.
 
@@ -67,7 +67,7 @@ else:
 
 ---
 
-### **[Cell 5] Train & Calibrate Models (80/20 Holdout Split)**
+### **[Cell 5] Train & Calibrate Models (90/10 Split - 1.98M Train Entities)**
 ```python
 import sys
 import os
@@ -76,8 +76,8 @@ sys.path.insert(0, os.path.abspath("."))
 import src
 from src.data.validation_split import ValidationSplitManager
 
-# 1. Ensure isolated split exists
-split_mgr = ValidationSplitManager(train_ratio=0.80, random_seed=42)
+# 1. Ensure isolated 90/10 split exists (1.98M Train / 220k Val)
+split_mgr = ValidationSplitManager(train_ratio=0.90, random_seed=42)
 split_mgr.create_splits()
 
 # 2. Train and tune threshold (with GPU acceleration if available)
@@ -89,15 +89,15 @@ artifacts = src.train_and_validate_pipeline(
     load_cached=True
 )
 
-print("\n=== Benchmark Performance on 20% Holdout Split ===")
+print("\n=== Benchmark Performance on 10% Holdout Split ===")
 display(artifacts["benchmark_summary"])
 ```
 
 ---
 
-### **[Cell 6] Full Streaming Test Inference (1,732,544 Entities)**
+### **[Cell 6] Full Streaming Test Inference (1,732,544 Entities | 1.5M Segment Size)**
 ```python
-# Runs full test streaming inference across France, India, and US
+# Runs high-speed streaming test inference across France, India, and US
 !python3 generate_final_submission.py
 ```
 
