@@ -1,7 +1,7 @@
 """
-Run USA Test Inference Only.
+Run USA Test Inference Only (Multi-Match Enabled).
 Loads model from pipeline_artifacts.joblib, runs US partition (663,106 records),
-and outputs:
+and outputs multi-match:
   - output/matching_results_usa.tsv
   - output/candidate_pairs_usa.tsv
 """
@@ -35,7 +35,7 @@ MAX_CANDIDATES_PER_ENTITY = 6     # Top 6 high-precision candidates
 def main():
     total_start = time.time()
     print("=" * 75)
-    print("🇺🇸 USA PARTITION TEST INFERENCE ENGINE")
+    print("🇺🇸 USA PARTITION TEST INFERENCE ENGINE (MULTI-MATCH ENABLED)")
     print("=" * 75)
 
     # 1. Load Model Weights & Calibrated Threshold
@@ -50,7 +50,7 @@ def main():
 
     artifacts = joblib.load(model_path)
     lgb_model = artifacts["models"]["lightgbm"]
-    threshold = float(artifacts["optimal_threshold"])
+    threshold = float(artifacts.get("optimal_threshold", 0.72))
     print(f"✓ LightGBM model loaded from {model_path} (Optimal Threshold τ* = {threshold:.2f})")
 
     # 2. Output Paths
@@ -94,7 +94,7 @@ def main():
     print(f"  ✓ Pre-profiled {total_us_s1:,} US S1 entities in {time.time()-t_prof:.2f}s")
 
     us_candidates: Dict[str, Set[str]] = {str(eid): set() for eid in s1_us_df["entity_id"].values}
-    us_best_matches: Dict[str, Tuple[str, float]] = {}
+    all_passing_pairs: List[Tuple[str, str, float]] = []
 
     # 5. Universal Segmented Streaming across US S2 and S3
     for src_label, src_file, src_total in [("S2", TEST_FILES["source2"], s2_us_total), ("S3", TEST_FILES["source3"], s3_us_total)]:
@@ -164,22 +164,21 @@ def main():
 
                     for (s1_id, target_id), prob in zip(meta_rows, probs):
                         if prob >= threshold:
-                            if s1_id not in us_best_matches or prob > us_best_matches[s1_id][1]:
-                                us_best_matches[s1_id] = (target_id, float(prob))
+                            all_passing_pairs.append((s1_id, target_id, float(prob)))
 
             print(f"      Segment {seg_num}/{total_segs} processed in {time.time()-t_seg:.2f}s")
             del blocker, target_profiles
             gc.collect()
 
-    # 6. Apply Global Injective Matching for US
-    print(f"\n--- Step 3: Applying Injective Matching on {len(us_best_matches):,} Candidate Matches ---")
-    sorted_pairs = sorted(us_best_matches.items(), key=lambda x: x[1][1], reverse=True)
+    # 6. Apply Global Multi-Match Injective Assignment for US
+    print(f"\n--- Step 3: Applying Multi-Match Injective Assignment on {len(all_passing_pairs):,} Passing Pairs ---")
+    all_passing_pairs.sort(key=lambda x: x[2], reverse=True)
     assigned_targets = set()
-    us_predictions: Dict[str, str] = {}
+    us_predictions: Dict[str, Set[str]] = {eid: set() for eid in s1_us_df["entity_id"].values}
 
-    for s1_id, (target_id, prob) in sorted_pairs:
+    for s1_id, target_id, prob in all_passing_pairs:
         if target_id not in assigned_targets:
-            us_predictions[s1_id] = target_id
+            us_predictions[s1_id].add(target_id)
             assigned_targets.add(target_id)
 
     # 7. Write US Results to Disk
@@ -192,20 +191,21 @@ def main():
 
         for s1_id_val in s1_us_df["entity_id"].values:
             s1_id = str(s1_id_val).strip()
-            matched_id = us_predictions.get(s1_id, "")
+            matched_set = us_predictions.get(s1_id, set())
             cands_set = us_candidates.get(s1_id, set())
 
-            if matched_id:
-                cands_set.add(matched_id)
+            if matched_set:
+                cands_set.update(matched_set)
 
+            matched_str = ",".join(sorted(list(matched_set)))
             cand_str = ",".join(sorted(list(cands_set)))
-            f_match.write(f"{s1_id}\t{matched_id}\n")
+            f_match.write(f"{s1_id}\t{matched_str}\n")
             f_cand.write(f"{s1_id}\t{cand_str}\n")
 
     print("=" * 75)
     print("🏆 USA PARTITION INFERENCE COMPLETE!")
     print(f"Total US S1 Entities:     {total_us_s1:,}")
-    print(f"Total Matches Assigned:   {len(assigned_targets):,}")
+    print(f"Total Targets Assigned:   {len(assigned_targets):,}")
     print(f"Time Taken:               {time.time()-total_start:.2f}s")
     print(f"USA Matching File:        {usa_matching_file}")
     print(f"USA Candidate File:       {usa_candidate_file}")

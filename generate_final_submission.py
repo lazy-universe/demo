@@ -1,7 +1,7 @@
 """
-Production Pipeline & Official Submission Generator.
-Memory-Safe LightGBM Engine (500k Segment Size, Peak RAM < 1.5 GB).
-Generates output/matching_results.tsv and output/candidate_pairs.tsv for all 1,732,544 test entities.
+Production Pipeline & Official Submission Generator (Multi-Match Enabled).
+Memory-Safe LightGBM Engine (1.5M Segment Size | 50k Query Chunks | Pre-Profiled C++ RapidFuzz).
+Generates multi-match output/matching_results.tsv and output/candidate_pairs.tsv for all 1,732,544 test entities.
 """
 
 import os
@@ -11,6 +11,7 @@ import gc
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 import duckdb
+import joblib
 import numpy as np
 import pandas as pd
 
@@ -29,14 +30,14 @@ from src.features.extractor import FEATURE_NAMES, extract_pair_features_fast, pr
 # High-Speed Constants for Colab (1.5M Targets per Segment)
 TARGET_SEGMENT_SIZE = 1_500_000   # 1.5M records per segment
 QUERY_CHUNK_SIZE = 50_000         # 50k query entities per batch
-MAX_CANDIDATES_PER_ENTITY = 6     # Top 6 high-precision candidates
+MAX_CANDIDATES_PER_ENTITY = 6     # Top 6 high-precision candidates per source
 
 
 def main():
     total_start = time.time()
     print("=" * 75)
     print("🚀 AMAZON ML CHALLENGE 2026: MASTER SUBMISSION GENERATOR")
-    print("   High-Speed LightGBM Engine (1.5M Segments | 50k Query Chunks)")
+    print("   Multi-Match Enabled LightGBM Engine (1.5M Segments | Pre-Profiled)")
     print("=" * 75)
 
     # -------------------------------------------------------------
@@ -44,19 +45,30 @@ def main():
     # -------------------------------------------------------------
     print("\n--- Step 1: Loading Trained Model & Calibrated Threshold ---")
     t0 = time.time()
-    artifacts = src.train_and_validate_pipeline(
-        train_s1_samples=50000,
-        val_s1_samples=10000,
-        random_state=42,
-        save_path="models/pipeline_artifacts.joblib",
-        load_cached=True
-    )
+    model_path = Path("models/pipeline_artifacts.joblib")
+    if not model_path.exists():
+        model_path = Path("help-me/pipeline_artifacts.joblib")
+
+    if model_path.exists():
+        artifacts = joblib.load(model_path)
+        print(f"✓ Loaded cached pipeline model weights from {model_path}")
+    else:
+        artifacts = src.train_and_validate_pipeline(
+            train_s1_samples=50000,
+            val_s1_samples=10000,
+            random_state=42,
+            save_path="models/pipeline_artifacts.joblib",
+            load_cached=True
+        )
     
     lgb_model = artifacts["models"]["lightgbm"]
-    summary_df = artifacts["benchmark_summary"]
+    summary_df = artifacts.get("benchmark_summary")
     
-    lgb_row = summary_df[summary_df["model"] == "LightGBM"]
-    threshold = float(lgb_row["optimal_threshold"].values[0]) if not lgb_row.empty else 0.68
+    if summary_df is not None and isinstance(summary_df, pd.DataFrame):
+        lgb_row = summary_df[summary_df["model"] == "LightGBM"]
+        threshold = float(lgb_row["optimal_threshold"].values[0]) if not lgb_row.empty else 0.72
+    else:
+        threshold = float(artifacts.get("optimal_threshold", 0.72))
         
     print(f"✓ LightGBM model ready (Optimal Threshold τ* = {threshold:.2f}) in {time.time()-t0:.2f}s")
 
@@ -121,11 +133,20 @@ def main():
         total_s1 = len(s1_df)
         print(f"  Records: S1={total_s1:,}, S2={s2_total:,}, S3={s3_total:,} (Total Targets: {s2_total+s3_total:,})")
 
-        # Map to accumulate candidates and best matching probability for S1
-        candidate_map: Dict[str, Set[str]] = {str(eid): set() for eid in s1_df["entity_id"].values}
-        best_candidate_map: Dict[str, Tuple[str, float]] = {}
+        # Pre-profile S1 entities for ultra-fast C++ matching
+        print("  Pre-profiling S1 entities...")
+        t_prof = time.time()
+        s1_profile_map: Dict[str, Dict[str, Any]] = {
+            str(eid): prepare_entity_profile(str(name), str(addr))
+            for eid, name, addr in zip(s1_df["entity_id"].values, s1_df["business_name"].values, s1_df["business_address"].values)
+        }
+        print(f"  ✓ Pre-profiled {total_s1:,} S1 entities in {time.time()-t_prof:.2f}s")
 
-        # Universal 500k Segmented Streaming across S2 and S3
+        # Accumulators
+        candidate_map: Dict[str, Set[str]] = {str(eid): set() for eid in s1_df["entity_id"].values}
+        all_passing_pairs: List[Tuple[str, str, float]] = []
+
+        # Universal 1.5M Segmented Streaming across S2 and S3
         for src_label, src_file, src_total in [("S2", TEST_FILES["source2"], s2_total), ("S3", TEST_FILES["source3"], s3_total)]:
             if src_total == 0:
                 continue
@@ -151,9 +172,9 @@ def main():
                 blocker = MultiKeyBlocker(max_block_size=200)
                 blocker.build_index_df(target_df)
 
-                # Fast target lookup tuples
-                target_records: Dict[str, Tuple[str, str]] = {
-                    str(eid): (str(name), str(addr))
+                # Pre-profile target records once for this segment
+                target_profiles: Dict[str, Dict[str, Any]] = {
+                    str(eid): prepare_entity_profile(str(name), str(addr))
                     for eid, name, addr in zip(target_df["entity_id"].values, target_df["business_name"].values, target_df["business_address"].values)
                 }
                 del target_df
@@ -169,54 +190,53 @@ def main():
                     feature_rows = []
                     meta_rows = []
 
-                    s1_eids = chunk_s1["entity_id"].values
-                    s1_names = chunk_s1["business_name"].values
-                    s1_addrs = chunk_s1["business_address"].values
-
-                    for s1_id_val, name1_val, addr1_val in zip(s1_eids, s1_names, s1_addrs):
+                    for s1_id_val in chunk_s1["entity_id"].values:
                         s1_id = str(s1_id_val).strip()
-                        cands = cand_dict.get(s1_id, set())
+                        cands = cand_dict.get(s1_id)
                         if not cands:
                             continue
 
                         # Accumulate candidate IDs
                         candidate_map[s1_id].update(cands)
-
-                        p1 = prepare_entity_profile(str(name1_val), str(addr1_val))
+                        p1 = s1_profile_map[s1_id]
 
                         for target_id in cands:
-                            trec = target_records.get(target_id)
-                            if not trec:
+                            p2 = target_profiles.get(target_id)
+                            if not p2:
                                 continue
-                            p2 = prepare_entity_profile(trec[0], trec[1])
 
                             feat_vector = extract_pair_features_fast(p1, p2, source2_prefix=src_label)
                             feature_rows.append(feat_vector)
                             meta_rows.append((s1_id, target_id))
 
                     if feature_rows:
-                        X_chunk = pd.DataFrame(feature_rows, columns=FEATURE_NAMES)
+                        X_chunk = pd.DataFrame(feature_rows, columns=FEATURE_NAMES, dtype=np.float32)
                         probs = lgb_model.predict_proba(X_chunk)[:, 1]
 
                         for (s1_id, target_id), prob in zip(meta_rows, probs):
                             if prob >= threshold:
-                                if s1_id not in best_candidate_map or prob > best_candidate_map[s1_id][1]:
-                                    best_candidate_map[s1_id] = (target_id, float(prob))
+                                all_passing_pairs.append((s1_id, target_id, float(prob)))
 
                 print(f"      Segment {seg_num}/{total_segs} processed in {time.time()-t_seg:.2f}s")
-                del blocker, target_records
+                del blocker, target_profiles
                 gc.collect()
 
-        # Apply Global Injective Matching across all segments for this country
-        print(f"  Applying global injective matching on {len(best_candidate_map):,} candidate matches...")
-        sorted_pairs = sorted(best_candidate_map.items(), key=lambda x: x[1][1], reverse=True)
+        # Apply Global Multi-Match Injective Assignment for this country
+        # (Allows S1 entities to match MULTIPLE targets from S2 and S3 while preventing target collision)
+        print(f"  Applying global multi-match injective assignment on {len(all_passing_pairs):,} passing pairs...")
+        all_passing_pairs.sort(key=lambda x: x[2], reverse=True)
         assigned_targets = set()
-        country_predictions: Dict[str, str] = {}
+        country_predictions: Dict[str, Set[str]] = {eid: set() for eid in s1_df["entity_id"].values}
 
-        for s1_id, (target_id, prob) in sorted_pairs:
+        for s1_id, target_id, prob in all_passing_pairs:
             if target_id not in assigned_targets:
-                country_predictions[s1_id] = target_id
+                country_predictions[s1_id].add(target_id)
                 assigned_targets.add(target_id)
+
+        # Count multi-matches
+        total_matched_entities = sum(1 for m in country_predictions.values() if m)
+        multi_matched_entities = sum(1 for m in country_predictions.values() if len(m) > 1)
+        print(f"  Matched S1 entities: {total_matched_entities:,} (Singletons: {total_s1-total_matched_entities:,} | Multi-matched: {multi_matched_entities:,})")
 
         # Append Country Results to Submission Files on Disk
         print(f"  Writing {total_s1:,} rows to submission files...")
@@ -224,28 +244,30 @@ def main():
              open(candidate_file, "a", encoding="utf-8") as f_cand:
             for s1_id_val in s1_df["entity_id"].values:
                 s1_id = str(s1_id_val).strip()
-                matched_id = country_predictions.get(s1_id, "")
+                matched_set = country_predictions.get(s1_id, set())
                 cands_set = candidate_map.get(s1_id, set())
 
-                # Ensure candidate list includes matched entity
-                if matched_id:
-                    cands_set.add(matched_id)
+                # Ensure candidate list includes all matched entities
+                if matched_set:
+                    cands_set.update(matched_set)
 
+                matched_str = ",".join(sorted(list(matched_set)))
                 cand_str = ",".join(sorted(list(cands_set)))
-                f_match.write(f"{s1_id}\t{matched_id}\n")
+
+                f_match.write(f"{s1_id}\t{matched_str}\n")
                 f_cand.write(f"{s1_id}\t{cand_str}\n")
 
         total_entities_processed += total_s1
         total_matches_assigned += len(assigned_targets)
         print(f"✓ [{country.upper()}] completed in {time.time()-t_country:.2f}s | Matches assigned: {len(assigned_targets):,}")
 
-        del s1_df, candidate_map, best_candidate_map, country_predictions
+        del s1_df, s1_profile_map, candidate_map, all_passing_pairs, country_predictions
         gc.collect()
 
     print("\n" + "=" * 75)
     print("🏆 ALL TEST PARTITIONS COMPLETED!")
     print(f"Total S1 Entities Processed: {total_entities_processed:,}")
-    print(f"Total Matches Assigned:      {total_matches_assigned:,}")
+    print(f"Total Targets Assigned:      {total_matches_assigned:,}")
     print(f"Total Time Taken:            {time.time()-total_start:.2f}s")
     print(f"Matching Results:            {matching_file}")
     print(f"Candidate Pairs:             {candidate_file}")
