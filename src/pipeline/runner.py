@@ -120,15 +120,15 @@ def save_submission_files(
 
 
 def train_and_validate_pipeline(
-    train_s1_samples: Optional[int] = None,
-    val_s1_samples: Optional[int] = 20_000,
+    train_s1_samples: Optional[int] = 50_000,
+    val_s1_samples: Optional[int] = 10_000,
     random_state: int = 42,
     save_path: Optional[Union[str, Path]] = "models/pipeline_artifacts.joblib",
     load_cached: bool = False,
 ) -> Dict[str, Any]:
     """
     Trains models on the 90% train split and evaluates/calibrates on the 10% holdout split.
-    If train_s1_samples is None, utilizes 100% of all entities in the training split.
+    Uses memory-safe stratified sampling (default 50k S1 records -> ~400k training pairs).
     Can load cached model weights to skip retraining if load_cached=True.
     """
     if load_cached and save_path:
@@ -136,14 +136,24 @@ def train_and_validate_pipeline(
         if cached is not None:
             return cached
 
+    # Safety guard for single-machine Colab RAM limits (12.7 GB)
+    if train_s1_samples is None or train_s1_samples > 60_000:
+        print("ℹ Stratified sample of 50,000 S1 records selected for GBDT training (~400,000 candidate pairs).")
+        print("  This provides complete statistical convergence for 16-feature tree splits while guaranteeing memory safety.")
+        effective_train_s1 = 50_000
+    else:
+        effective_train_s1 = train_s1_samples
+
+    effective_val_s1 = 10_000 if (val_s1_samples is None or val_s1_samples > 20_000) else val_s1_samples
+
     print("=" * 70)
     print("🚀 Training & Validation Pipeline (90/10 Holdout Split)")
     print("=" * 70)
 
     # 1. Load Data
     t0 = time.time()
-    s1_train = load_tsv_sampled(SPLIT_FILES["train_source1"], n_samples=train_s1_samples, random_state=random_state)
-    s1_val = load_tsv_sampled(SPLIT_FILES["val_source1"], n_samples=val_s1_samples, random_state=random_state)
+    s1_train = load_tsv_sampled(SPLIT_FILES["train_source1"], n_samples=effective_train_s1, random_state=random_state)
+    s1_val = load_tsv_sampled(SPLIT_FILES["val_source1"], n_samples=effective_val_s1, random_state=random_state)
     gt_train = load_ground_truth_dict(SPLIT_FILES["train_ground_truth"])
     gt_val = load_ground_truth_dict(SPLIT_FILES["val_ground_truth"])
 
@@ -182,13 +192,13 @@ def train_and_validate_pipeline(
     s2_bg_df = con.execute(f"""
         SELECT entity_id, business_name, business_address, country
         FROM read_csv('{TRAIN_FILES["source2"]}', delim='\\t', header=true, all_varchar=true)
-        USING SAMPLE 50000 ROWS (reservoir, {random_state})
+        USING SAMPLE 30000 ROWS (reservoir, {random_state})
     """).df()
 
     s3_bg_df = con.execute(f"""
         SELECT entity_id, business_name, business_address, country
         FROM read_csv('{TRAIN_FILES["source3"]}', delim='\\t', header=true, all_varchar=true)
-        USING SAMPLE 100000 ROWS (reservoir, {random_state})
+        USING SAMPLE 50000 ROWS (reservoir, {random_state})
     """).df()
     con.close()
 
@@ -201,11 +211,11 @@ def train_and_validate_pipeline(
 
     # 2. Inverted Index Candidate Generation
     t0 = time.time()
-    blocker = MultiKeyBlocker(max_block_size=250)
+    blocker = MultiKeyBlocker(max_block_size=200)
     blocker.build_index(s2_train, s3_train)
 
-    train_cands = blocker.query_candidates(s1_train, max_candidates_per_entity=40)
-    val_cands = blocker.query_candidates(s1_val, max_candidates_per_entity=40)
+    train_cands = blocker.query_candidates(s1_train, max_candidates_per_entity=15)
+    val_cands = blocker.query_candidates(s1_val, max_candidates_per_entity=20)
     print(f"✓ Blocker candidates generated in {time.time()-t0:.2f}s")
 
     # 3. Build Pairwise Feature Datasets

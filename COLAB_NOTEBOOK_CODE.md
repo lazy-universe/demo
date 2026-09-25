@@ -59,7 +59,7 @@ if not os.path.exists(dataset_test_s1):
     print("Downloading official dataset zip...")
     !wget -q --show-progress "{DATASET_ZIP_URL}" -O dataset.zip
     print("Extracting dataset files...")
-    !unzip -q -o dataset.zip -d dataset/student_resource/
+    !unzip -q -o dataset.zip -d dataset/
     print("✓ Dataset ready!")
 else:
     print("✓ Dataset already extracted and ready!")
@@ -81,9 +81,10 @@ split_mgr = ValidationSplitManager(train_ratio=0.90, random_seed=42)
 split_mgr.create_splits()
 
 # 2. Train and tune threshold (with GPU acceleration if available)
+# Using 50,000 stratified training S1 entities (~400,000 candidate pairs with hard negatives)
 artifacts = src.train_and_validate_pipeline(
-    train_s1_samples=10000,
-    val_s1_samples=2500,
+    train_s1_samples=50000,
+    val_s1_samples=10000,
     random_state=42,
     save_path="models/pipeline_artifacts.joblib",
     load_cached=True

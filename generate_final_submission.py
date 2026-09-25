@@ -45,8 +45,8 @@ def main():
     print("\n--- Step 1: Loading Trained Model & Calibrated Threshold ---")
     t0 = time.time()
     artifacts = src.train_and_validate_pipeline(
-        train_s1_samples=6000,
-        val_s1_samples=1500,
+        train_s1_samples=50000,
+        val_s1_samples=10000,
         random_state=42,
         save_path="models/pipeline_artifacts.joblib",
         load_cached=True

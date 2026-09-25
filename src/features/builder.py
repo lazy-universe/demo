@@ -3,11 +3,15 @@ Training and Validation Pairwise Dataset Builder.
 Combines True Positive links and Hard Negative candidate pairs into feature matrices.
 """
 
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 import numpy as np
 import pandas as pd
 
-from .extractor import FEATURE_NAMES, extract_pair_features
+from .extractor import (
+    FEATURE_NAMES,
+    extract_pair_features_fast,
+    prepare_entity_profile,
+)
 
 
 def build_pairwise_dataset(
@@ -19,27 +23,43 @@ def build_pairwise_dataset(
     include_all_true_positives: bool = True,
 ) -> Tuple[pd.DataFrame, np.ndarray, pd.DataFrame]:
     """
-    Constructs pairwise feature DataFrame X, binary label array y, and pair metadata DataFrame.
+    High-speed, memory-efficient pairwise dataset builder.
+    Pre-computes entity profiles and uses fast RapidFuzz feature extraction.
     """
-    # Build fast lookup dictionaries
-    s1_dict = s1_df.set_index("entity_id").to_dict(orient="index")
-    s2_dict = s2_df.set_index("entity_id").to_dict(orient="index")
-    s3_dict = s3_df.set_index("entity_id").to_dict(orient="index")
+    # 1. Pre-compute S1 profiles
+    s1_profiles: Dict[str, Dict[str, Any]] = {}
+    for eid, name, addr in zip(s1_df["entity_id"].values, s1_df["business_name"].values, s1_df["business_address"].values):
+        s1_profiles[str(eid)] = prepare_entity_profile(str(name), str(addr))
 
-    def get_target_record(eid: str) -> Dict[str, str]:
-        if eid.startswith("S2-"):
-            return s2_dict.get(eid, {})
-        elif eid.startswith("S3-"):
-            return s3_dict.get(eid, {})
-        return s1_dict.get(eid, {})
+    # 2. Collect only target IDs that appear in candidates or ground truth
+    all_needed_targets = set()
+    for s1_id, cand_set in candidate_dict.items():
+        all_needed_targets.update(cand_set)
+        if include_all_true_positives and ground_truth_dict:
+            all_needed_targets.update(ground_truth_dict.get(s1_id, set()))
+
+    # 3. Pre-compute Target profiles only for needed targets
+    target_profiles: Dict[str, Dict[str, Any]] = {}
+    
+    # Filter S2
+    s2_mask = s2_df["entity_id"].isin(all_needed_targets)
+    for eid, name, addr in zip(s2_df.loc[s2_mask, "entity_id"].values, s2_df.loc[s2_mask, "business_name"].values, s2_df.loc[s2_mask, "business_address"].values):
+        target_profiles[str(eid)] = prepare_entity_profile(str(name), str(addr))
+
+    # Filter S3
+    s3_mask = s3_df["entity_id"].isin(all_needed_targets)
+    for eid, name, addr in zip(s3_df.loc[s3_mask, "entity_id"].values, s3_df.loc[s3_mask, "business_name"].values, s3_df.loc[s3_mask, "business_address"].values):
+        target_profiles[str(eid)] = prepare_entity_profile(str(name), str(addr))
 
     feature_rows = []
-    labels = []
-    meta_rows = []
+    labels: List[int] = []
+    s1_meta: List[str] = []
+    target_meta: List[str] = []
+    comp_meta: List[float] = []
 
     for s1_id, cand_set in candidate_dict.items():
-        s1 = s1_dict.get(s1_id)
-        if not s1:
+        p1 = s1_profiles.get(s1_id)
+        if not p1:
             continue
 
         true_set = ground_truth_dict.get(s1_id, set()) if ground_truth_dict else set()
@@ -52,36 +72,27 @@ def build_pairwise_dataset(
             evaluated_cands.update(true_set)
 
         for target_id in evaluated_cands:
-            target_rec = get_target_record(target_id)
-            if not target_rec:
+            p2 = target_profiles.get(target_id)
+            if not p2:
                 continue
 
-            feat = extract_pair_features(
-                name1=s1["business_name"],
-                addr1=s1["business_address"],
-                country1=s1["country"],
-                name2=target_rec.get("business_name", ""),
-                addr2=target_rec.get("business_address", ""),
-                country2=target_rec.get("country", ""),
-                source2_prefix=target_id[:2],
-            )
-
-            # Filter to pure feature vector
-            vector = [feat[fname] for fname in FEATURE_NAMES]
+            vector = extract_pair_features_fast(p1, p2, source2_prefix=target_id[:2])
             feature_rows.append(vector)
 
-            # Label: 1 if true match, 0 if negative candidate
             is_match = 1 if target_id in true_set else 0
             labels.append(is_match)
 
-            meta_rows.append({
-                "source1_entity_id": s1_id,
-                "target_entity_id": target_id,
-                "composite_score": feat["composite_score"],
-            })
+            s1_meta.append(s1_id)
+            target_meta.append(target_id)
+            comp_meta.append(vector[15])  # composite_score is feature index 15
 
-    X = pd.DataFrame(feature_rows, columns=FEATURE_NAMES)
-    y = np.array(labels, dtype=int)
-    meta_df = pd.DataFrame(meta_rows)
+    X = pd.DataFrame(feature_rows, columns=FEATURE_NAMES, dtype=np.float32)
+    y = np.array(labels, dtype=np.int32)
+    meta_df = pd.DataFrame({
+        "source1_entity_id": s1_meta,
+        "target_entity_id": target_meta,
+        "composite_score": comp_meta,
+    })
 
     return X, y, meta_df
+
