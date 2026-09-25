@@ -5,7 +5,7 @@ Creates leak-free 80/20 train/validation splits from training files.
 
 import os
 from pathlib import Path
-from typing import Dict, Optional, Set, Tuple, Union
+from typing import Any, Dict, Optional, Set, Tuple, Union
 import numpy as np
 import pandas as pd
 
@@ -55,11 +55,21 @@ class ValidationSplitManager:
         self,
         s1_source_path: Optional[Union[str, Path]] = None,
         gt_source_path: Optional[Union[str, Path]] = None,
+        train_ratio: Optional[float] = None,
+        random_state: Optional[int] = None,
+        random_seed: Optional[int] = None,
         force_recreate: bool = False,
+        **kwargs: Any,
     ) -> Dict[str, Path]:
         """
         Creates and persists the 80/20 train/validation split files.
         """
+        if train_ratio is not None:
+            self.train_ratio = train_ratio
+        if random_state is not None:
+            self.random_seed = random_state
+        elif random_seed is not None:
+            self.random_seed = random_seed
         if self.splits_exist() and not force_recreate:
             return self.get_split_paths()
 
