@@ -27,9 +27,9 @@ from src.config import (
 from src.blocking.inverted_index import MultiKeyBlocker
 from src.features.extractor import FEATURE_NAMES, extract_pair_features_fast, prepare_entity_profile
 
-# Memory-Safe Constants for Colab (Peak RAM < 2.0 GB Guaranteed)
-TARGET_SEGMENT_SIZE = 500_000     # 500k target records per segment (< 700 MB)
-QUERY_CHUNK_SIZE = 100_000        # 100k query entities per batch (< 150 MB)
+# Optimal High-Throughput Constants for Colab (1.0M Targets | 200k Queries | Peak RAM ~5.0 GB)
+TARGET_SEGMENT_SIZE = 1_000_000   # 1.0M target records per segment
+QUERY_CHUNK_SIZE = 200_000        # 200k query entities per batch
 MAX_CANDIDATES_PER_ENTITY = 6     # Top 6 high-precision candidates per source
 
 
